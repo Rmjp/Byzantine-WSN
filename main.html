@@ -1,0 +1,788 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Byzantine Sensing Network — Majority-Consensus Simulator</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root{
+    --bg:#0f1221; --panel:#171a2e; --ink:#e9ecff; --muted:#98a2ff; --accent:#7aa2ff; --bad:#ff6b6b; --good:#51cf66; --warn:#ffd43b;
+    --grid:#2a2e4a;
+  }
+  html,body{height:100%}
+  body{
+    margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial,sans-serif;
+    color:var(--ink); background:linear-gradient(180deg,#0b0f1c, #121633);
+  }
+  header{padding:12px 18px; border-bottom:1px solid #20254a; display:flex; gap:14px; align-items:center}
+  header h1{font-size:18px; margin:0; letter-spacing:.3px; font-weight:700}
+  header .mini{opacity:.7; font-weight:500}
+  .wrap{display:grid; grid-template-columns: 360px 1fr; gap:14px; height:calc(100% - 54px)}
+  .panel{background:var(--panel); border:1px solid #20254a; border-radius:14px; padding:14px; overflow:auto}
+  .controls h3, .charts h3{margin:8px 0 10px; font-size:14px; text-transform:uppercase; letter-spacing:.12em; color:var(--muted)}
+  .controls label{font-size:13px; display:block; margin:10px 0 4px; color:#cdd3ff}
+  .controls input[type="number"], .controls select, .controls input[type="range"]{
+    width:100%; padding:8px; border-radius:10px; background:#0d1022; color:var(--ink); border:1px solid #2a2e56;
+    outline:none;
+  }
+  .row{display:grid; grid-template-columns:1fr 1fr; gap:10px}
+  .btnbar{display:flex; gap:8px; margin-top:10px; flex-wrap:wrap}
+  button{
+    background:linear-gradient(180deg,#28306b,#21285e); color:var(--ink); border:1px solid #2c3475; padding:8px 12px; border-radius:10px;
+    cursor:pointer; font-weight:600;
+  }
+  button.secondary{background:#141836}
+  button:disabled{opacity:.5; cursor:not-allowed}
+  .badge{display:inline-flex; align-items:center; gap:6px; padding:6px 10px; border-radius:999px; background:#121740; border:1px solid #27317a; font-size:12px}
+  .grid{display:grid; grid-template-columns:1fr 1fr; gap:12px}
+  .canvasBox{position:relative; background:#0b0f1f; border-radius:12px; border:1px solid #1e244a}
+  svg{display:block}
+  .tooltip{
+    position:absolute; pointer-events:none; background:#0d1128; border:1px solid #27317a; color:var(--ink);
+    padding:10px 12px; border-radius:10px; font-size:12px; box-shadow:0 10px 30px rgba(0,0,0,.35); z-index:10; min-width:220px
+  }
+  .legend{display:flex; gap:10px; flex-wrap:wrap; margin-top:8px}
+  .legend .item{display:flex; gap:6px; align-items:center; font-size:12px; opacity:.9}
+  .sw{inline-size:14px; block-size:14px; border-radius:50%; display:inline-block; border:2px solid #fff4}
+  .sw.alive{background:var(--good)}
+  .sw.dead{background:var(--bad)}
+  .sw.ch{background:var(--warn)}
+  .sw.byza{background:#ff9f43}
+  .statrow{display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-top:8px}
+  .stat{background:#0f1433; border:1px solid #27317a; border-radius:12px; padding:8px 10px}
+  .stat b{display:block; font-size:18px; margin-top:4px}
+  .chart{height:240px}
+  .notice{font-size:12px; opacity:.75; margin-top:6px}
+  .codehint{font-size:12px; opacity:.8; background:#0f1433; padding:8px 10px; border-radius:10px; border:1px solid #27317a}
+  .tabs{display:flex; gap:8px; margin:10px 0}
+  .tab{padding:6px 10px; border-radius:10px; border:1px solid #27317a; cursor:pointer; background:#111745}
+  .tab.active{background:#1b2363}
+</style>
+</head>
+<body>
+<header>
+  <h1>Byzantine Sensing Network — Majority-Consensus Simulator</h1>
+  <span class="mini">K-means clusters • BA tolerance • Majority aggregation • LEACH/DEEC/SEP baselines</span>
+</header>
+
+<div class="wrap">
+  <aside class="panel controls">
+    <h3>Simulation setup</h3>
+    <div class="row">
+      <div>
+        <label>Nodes (n)</label>
+        <input id="nodes" type="number" min="10" max="500" step="10" value="100">
+      </div>
+      <div>
+        <label>Clusters (odd ≥ 3)</label>
+        <input id="clusters" type="number" min="3" step="2" value="5">
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label>Field size (m)</label>
+        <input id="field" type="number" min="50" step="50" value="200">
+      </div>
+      <div>
+        <label>Rounds</label>
+        <input id="rounds" type="number" min="50" step="50" value="400">
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label>Sink position</label>
+        <select id="sink">
+          <option value="87,87">87×87 (paper)</option>
+          <option value="100,100" selected>100×100</option>
+          <option value="174,174">174×174</option>
+          <option value="200,200">200×200</option>
+          <option value="center">Center</option>
+        </select>
+      </div>
+      <div>
+        <label>Fault tolerance</label>
+        <select id="ft">
+          <option value="1/2">1/2</option>
+          <option value="1/3" selected>1/3 (BA classic)</option>
+          <option value="1/4">1/4</option>
+        </select>
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label>Threshold T (sensor → binary)</label>
+        <input id="thresh" type="range" min="0" max="1" step="0.01" value="0.5">
+      </div>
+      <div>
+        <label>Byzantine nodes %</label>
+        <input id="byzPct" type="range" min="0" max="40" step="1" value="10">
+      </div>
+    </div>
+
+    <h3>Consensus (editable)</h3>
+    <div class="row">
+      <div>
+        <label>Cluster-level</label>
+        <select id="clusterAlgo">
+          <option value="majority" selected>Majority ≥ n/2</option>
+          <option value="weighted">Weighted Majority (energy-weighted)</option>
+          <option value="rm">Random Neighbors Majority (toy)</option>
+        </select>
+      </div>
+      <div>
+        <label>Network-level</label>
+        <select id="netAlgo">
+          <option value="sop" selected>Majority of CHs (SOP)</option>
+          <option value="kofn">k-of-n (set k below)</option>
+          <option value="alltrue">All True (strict)</option>
+        </select>
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label>k for k-of-n</label>
+        <input id="kofn" type="number" min="1" value="3">
+      </div>
+      <div>
+        <label>Radio model: E_elec (nJ/bit)</label>
+        <input id="Eelec" type="number" value="50">
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label>Data agg (nJ/bit/signal)</label>
+        <input id="EDA" type="number" value="5">
+      </div>
+      <div>
+        <label>Bits per packet</label>
+        <input id="bits" type="number" value="4000">
+      </div>
+    </div>
+
+    <h3>Compare Algorithms</h3>
+    <div class="row">
+      <div>
+        <label>Baselines</label>
+        <select id="baselines" multiple size="4">
+          <option value="BCA" selected>BCA (this paper)</option>
+          <option value="LEACH" selected>LEACH</option>
+          <option value="DEEC" selected>DEEC</option>
+          <option value="SEP" selected>SEP</option>
+        </select>
+      </div>
+      <div>
+        <label>Seed</label>
+        <input id="seed" type="number" value="42">
+      </div>
+    </div>
+
+    <div class="btnbar">
+      <button id="run">Run Simulation</button>
+      <button id="step">Step 1 Round</button>
+      <button id="reset" class="secondary">Reset</button>
+      <span class="badge" id="status">Ready</span>
+    </div>
+
+    <p class="notice">
+      Hover nodes to see details. Hover charts to see exact values.
+      FND/LND markers show first/last node death rounds.
+    </p>
+    <p class="codehint">
+      Edit <b>CONSENSUS.CLUSTER</b> and <b>CONSENSUS.NETWORK</b> blocks in code below (search for them) to customize logic.
+    </p>
+  </aside>
+
+  <main class="panel">
+    <div class="tabs">
+      <div class="tab active" data-tab="net">Network</div>
+      <div class="tab" data-tab="charts">Charts</div>
+      <div class="tab" data-tab="log">Log</div>
+    </div>
+
+    <section id="tab-net" class="tabpane">
+      <div class="grid">
+        <div class="canvasBox" id="netBox">
+          <div id="netTip" class="tooltip" style="display:none"></div>
+          <svg id="net" width="600" height="600" aria-label="Network field"></svg>
+          <div class="legend" style="padding:8px 10px">
+            <div class="item"><span class="sw alive"></span> Alive</div>
+            <div class="item"><span class="sw dead"></span> Dead</div>
+            <div class="item"><span class="sw ch"></span> Cluster Head</div>
+            <div class="item"><span class="sw byza"></span> Byzantine</div>
+          </div>
+        </div>
+        <div class="panel" style="background:#0e1230">
+          <h3>Run stats</h3>
+          <div class="statrow">
+            <div class="stat">Round<b id="stRound">0</b></div>
+            <div class="stat">Alive<b id="stAlive">0</b></div>
+            <div class="stat">Consensus<b id="stCons">–</b></div>
+          </div>
+          <div class="statrow">
+            <div class="stat">FND (first death)<b id="stFND">–</b></div>
+            <div class="stat">LND (last death)<b id="stLND">–</b></div>
+            <div class="stat">Faulty (n)<b id="stFaulty">0</b></div>
+          </div>
+          <div style="margin-top:10px">
+            <h3>Cluster Majority</h3>
+            <div id="clusterList"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-charts" class="tabpane" style="display:none">
+      <div class="grid">
+        <div class="canvasBox">
+          <div id="energyTip" class="tooltip" style="display:none"></div>
+          <svg id="energyChart" class="chart" aria-label="Total energy"></svg>
+        </div>
+        <div class="canvasBox">
+          <div id="aliveTip" class="tooltip" style="display:none"></div>
+          <svg id="aliveChart" class="chart" aria-label="Alive nodes"></svg>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-log" class="tabpane" style="display:none">
+      <pre id="log" style="white-space:pre-wrap; font-size:12px; line-height:1.35; margin:0"></pre>
+    </section>
+  </main>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+<script>
+/*** Utilities ***/
+const rand = (seed => { // deterministic rng
+  let s = seed >>> 0;
+  return () => (s = (s * 1664525 + 1013904223) >>> 0) / 4294967296;
+});
+const clamp = (x,a,b)=>Math.max(a,Math.min(b,x));
+const dist = (a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
+const fmt = n => (Math.abs(n)>=1? n.toFixed(2): n.toPrecision(2));
+const pick = (arr, r)=>arr[Math.floor(r()*arr.length)];
+function kmeans(points, k, rgen) {
+  // simple K-means (few iters) for clustering display
+  let cents = Array.from({length:k}, _ => ({x:rgen()*1, y:rgen()*1}));
+  for(let it=0; it<6; it++){
+    const groups = Array.from({length:k}, _=>[]);
+    for(const p of points){
+      let bi=0, bd=1e9;
+      for(let i=0;i<k;i++){ const d = (p.x-cents[i].x)**2+(p.y-cents[i].y)**2; if(d<bd){bd=d; bi=i} }
+      groups[bi].push(p);
+    }
+    for(let i=0;i<k;i++){
+      if(groups[i].length){
+        const sx = groups[i].reduce((s,p)=>s+p.x,0), sy = groups[i].reduce((s,p)=>s+p.y,0);
+        cents[i] = {x:sx/groups[i].length, y:sy/groups[i].length};
+      }
+    }
+  }
+  // final assignment
+  for(const p of points){
+    let bi=0, bd=1e9;
+    for(let i=0;i<k;i++){ const d = (p.x-cents[i].x)**2+(p.y-cents[i].y)**2; if(d<bd){bd=d; bi=i} }
+    p.cluster = bi;
+  }
+  return cents;
+}
+
+/*** Consensus logic (YOU CAN EDIT) ***/
+const CONSENSUS = {
+  // Cluster-level consensus — returns {majority:boolean, votes:{ones,zeros}}
+  CLUSTER(nodes, params, rgen, mode){
+    // nodes: array in cluster; each has .reading (0..1), .binary (0/1), .energy
+    if(mode==="weighted"){
+      let w1=0, w0=0;
+      for(const n of nodes){ (n.binary? (w1+=n.energy) : (w0+=n.energy)); }
+      return { majority: w1>=w0, votes:{ones:w1, zeros:w0} };
+    } else if(mode==="rm"){ // random neighbors majority (toy)
+      let ones=0, zeros=0;
+      for(const n of nodes){
+        // pick m random peers (including n), m ~ 1 + log2(cluster size)
+        const m = Math.max(3, Math.ceil(Math.log2(nodes.length+1)));
+        for(let i=0;i<m;i++){ const peer = pick(nodes, rgen); (peer.binary? ones++ : zeros++); }
+      }
+      return { majority: ones>=zeros, votes:{ones, zeros} };
+    } else { // "majority"
+      let ones=0; for(const n of nodes){ if(n.binary) ones++; }
+      const zeros = nodes.length - ones;
+      return { majority: ones>=Math.ceil(nodes.length/2), votes:{ones, zeros} };
+    }
+  },
+  // Network-level consensus across CHs — returns boolean
+  NETWORK(chMajorities, mode, k){
+    if(mode==="alltrue") return chMajorities.every(Boolean);
+    if(mode==="kofn")    return chMajorities.filter(Boolean).length >= k;
+    // "sop": standard majority across clusters
+    const ones = chMajorities.filter(Boolean).length;
+    return ones >= Math.ceil(chMajorities.length/2);
+  }
+};
+
+/*** Algorithm skeletons ***/
+function simulateRound(state){
+  const {
+    nodes, chs, params, rgen, alg, round
+  } = state;
+  const {T, Eelec, EDA, bits, sink, clusterAlgo, netAlgo, kofn, ftFrac, field} = params;
+
+  // Sensor readings + Byzantine behavior (binary assertion)
+  for(const n of nodes){
+    if(n.dead) continue;
+    // generate reading in [0,1] with mild spatial correlation to (x,y)
+    const noise = (rgen()-0.5)*0.15;
+    const base = (n.x*0.3 + n.y*0.7) + noise; // heuristic
+    n.reading = clamp(base,0,1);
+    let bin = n.reading >= T ? 1 : 0;
+    if(n.byz && !n.dead){
+      // Byzantine: flip or randomize with high probability
+      if(rgen()<0.8) bin = 1-bin; else bin = rgen()<0.5? 0:1;
+    }
+    n.binary = bin;
+  }
+
+  // Cluster-level majority at CHs
+  const k = chs.length;
+  const chMajorities = [];
+  for(let ci=0; ci<k; ci++){
+    const inCluster = nodes.filter(n => n.cluster===ci && !n.dead);
+    const res = CONSENSUS.CLUSTER(inCluster, params, rgen, clusterAlgo);
+    chs[ci].maj = res.majority;
+    chs[ci].votes = res.votes;
+    chMajorities.push(res.majority);
+    // Energy: nodes tx to CH, CH aggregates & tx to sink
+    const ch = chs[ci];
+    // node -> CH
+    for(const n of inCluster){
+      const d = Math.hypot((n.x-ch.x)*field, (n.y-ch.y)*field);
+      const Etx = (Eelec*bits + 0.001 * d) * 1e-9; // simplified path loss term
+      n.energy -= Etx;
+      if(n.energy<=0){ n.energy=0; n.dead=true; }
+      const Erx = (Eelec*bits) * 1e-9;
+      ch.energy -= Erx;
+    }
+    // CH aggregation cost
+    ch.energy -= (EDA*bits*inCluster.length) * 1e-9;
+    // CH -> sink send only binary (1 bit → model with same header size)
+    const ds = Math.hypot((ch.x-sink.x)*field, (ch.y-sink.y)*field);
+    ch.energy -= (Eelec*bits + 0.001 * ds) * 1e-9;
+    if(ch.energy<=0){ ch.energy=0; ch.dead=true; }
+  }
+
+  // Network-level consensus + Byzantine fault tolerance condition
+  const consensus = CONSENSUS.NETWORK(chMajorities, netAlgo, kofn);
+  const faulty = nodes.filter(n => n.dead || n.byz).length;
+  const faultLimit = Math.floor(nodes.length * ftFrac);
+  const baOk = faulty < faultLimit;
+
+  // Update stats
+  const alive = nodes.filter(n=>!n.dead).length;
+  state.history.alive.push(alive);
+  const totE = nodes.reduce((s,n)=>s+n.energy,0) + chs.reduce((s,c)=>s+c.energy,0);
+  state.history.energy.push(totE);
+  state.consensusNow = consensus && baOk;
+
+  // Record FND / LND
+  if(state.FND===null && alive < nodes.length) state.FND = round;
+  if(alive===0) state.LND ??= round;
+
+  return state;
+}
+
+// LEACH/DEEC/SEP toy variants (focus on energy behavior & CH rotation)
+function simulateRoundBaseline(state, kind){
+  const {nodes, params, rgen, round} = state;
+  const {Eelec, EDA, bits, field, sink} = params;
+  // Each baseline: re-elect CHs per round with different weights
+  // Assign CH probability: LEACH uniform; DEEC ∝ energy; SEP: a fraction advanced nodes with higher P
+  let P = .05; // expected CH fraction
+  // Mark CHs
+  for(const n of nodes){ n.isCH=false; if(n.dead) continue; }
+  const eligible = nodes.filter(n=>!n.dead);
+  const choose = (arr,p) => arr.filter(()=>rgen()<p);
+
+  if(kind==="LEACH"){
+    for(const n of eligible){ if(rgen()<P) n.isCH=true; }
+  } else if(kind==="DEEC"){
+    const maxE = Math.max(...eligible.map(n=>n.energy));
+    for(const n of eligible){
+      const w = (n.energy/maxE);
+      if(rgen() < clamp(P*1.5*w, 0, 0.5)) n.isCH=true;
+    }
+  } else { // SEP
+    // 10% advanced nodes with extra energy get higher CH prob
+    for(const n of eligible){
+      const isAdv = n.adv ?? (n.adv = rgen()<0.1);
+      const p = isAdv? P*2.2 : P*0.6;
+      if(rgen()<p) n.isCH=true;
+    }
+  }
+  const chs = eligible.filter(n=>n.isCH);
+  if(chs.length===0 && eligible.length) pick(eligible,rgen).isCH=true;
+
+  // Nodes send full packets to nearest CH; CH aggregates and sends to sink
+  for(const n of eligible){
+    if(n.isCH) continue;
+    let near = null, bd=1e9;
+    for(const c of chs){ const d=(n.x-c.x)**2+(n.y-c.y)**2; if(d<bd){bd=d; near=c;} }
+    const d = Math.hypot((n.x-near.x)*field,(n.y-near.y)*field);
+    n.energy -= (Eelec*bits + 0.001*d) * 1e-9;
+    near.energy -= (Eelec*bits) * 1e-9;
+    if(n.energy<=0){ n.energy=0; n.dead=true; }
+  }
+  for(const c of chs){
+    const inDeg = eligible.filter(n=>!n.isCH && !n.dead)
+      .filter(n=>{ // nearest to c ?
+        let near=null,bd=1e9;
+        for(const cc of chs){ const d=(n.x-cc.x)**2+(n.y-cc.y)**2; if(d<bd){bd=d; near=cc;} }
+        return near===c;
+      }).length;
+    c.energy -= (EDA*bits*inDeg) * 1e-9;
+    const ds = Math.hypot((c.x-params.sink.x)*field,(c.y-params.sink.y)*field);
+    c.energy -= (Eelec*bits + 0.001*ds) * 1e-9;
+    if(c.energy<=0){ c.energy=0; c.dead=true; }
+  }
+
+  const alive = nodes.filter(n=>!n.dead).length;
+  state.history.alive.push(alive);
+  state.history.energy.push(nodes.reduce((s,n)=>s+n.energy,0));
+  if(state.FND===null && alive < nodes.length) state.FND = round;
+  if(alive===0) state.LND ??= round;
+  state.consensusNow = null; // not applicable
+  return state;
+}
+
+/*** Environment setup & UI ***/
+const ui = {
+  nodes: document.getElementById('nodes'),
+  clusters: document.getElementById('clusters'),
+  field: document.getElementById('field'),
+  rounds: document.getElementById('rounds'),
+  sink: document.getElementById('sink'),
+  ft: document.getElementById('ft'),
+  thresh: document.getElementById('thresh'),
+  byzPct: document.getElementById('byzPct'),
+  clusterAlgo: document.getElementById('clusterAlgo'),
+  netAlgo: document.getElementById('netAlgo'),
+  kofn: document.getElementById('kofn'),
+  Eelec: document.getElementById('Eelec'),
+  EDA: document.getElementById('EDA'),
+  bits: document.getElementById('bits'),
+  baselines: document.getElementById('baselines'),
+  seed: document.getElementById('seed'),
+  run: document.getElementById('run'),
+  step: document.getElementById('step'),
+  reset: document.getElementById('reset'),
+  status: document.getElementById('status'),
+  stRound: document.getElementById('stRound'),
+  stAlive: document.getElementById('stAlive'),
+  stCons: document.getElementById('stCons'),
+  stFND: document.getElementById('stFND'),
+  stLND: document.getElementById('stLND'),
+  stFaulty: document.getElementById('stFaulty'),
+  clusterList: document.getElementById('clusterList'),
+  netSVG: d3.select('#net'),
+  netTip: document.getElementById('netTip'),
+  energySVG: d3.select('#energyChart'),
+  energyTip: document.getElementById('energyTip'),
+  aliveSVG: d3.select('#aliveChart'),
+  aliveTip: document.getElementById('aliveTip'),
+  log: document.getElementById('log'),
+};
+
+let app = null;
+
+function initState(){
+  const N = +ui.nodes.value;
+  const K = Math.max(3, (+ui.clusters.value|0)|1); // odd
+  const F = +ui.field.value;
+  const seed = (+ui.seed.value) || 42;
+  const rgen = rand(seed);
+  const sinkSel = ui.sink.value;
+  let sink;
+  if(sinkSel==="center") sink = {x:.5, y:.5};
+  else { const [sx,sy] = sinkSel.split(',').map(Number); sink = {x:sx/F, y:sy/F}; }
+  const ftFrac = eval(ui.ft.value); // 1/2, 1/3, 1/4
+
+  // Generate nodes in [0,1] space then scale on draw
+  const nodes = Array.from({length:N}, (_,i)=>({
+    id:i+1,
+    x: (rgen()*0.9+0.05), y: (rgen()*0.9+0.05),
+    energy: 0.5, // J (paper)
+    dead:false,
+    byz:false,
+  }));
+  // Assign byzantine
+  const byzN = Math.floor(N * (+ui.byzPct.value)/100);
+  for(let i=0;i<byzN;i++){ nodes[i].byz = true; }
+
+  // Clustering (fixed CHs for BCA; baselines re-elect)
+  const cents = kmeans(nodes, K, rgen).map(c=>({x:c.x, y:c.y, energy:5, dead:false})); // CH energy 5J
+  nodes.forEach(n=>{
+    // already assigned .cluster by kmeans
+  });
+
+  return {
+    params:{
+      T:+ui.thresh.value, Eelec:+ui.Eelec.value, EDA:+ui.EDA.value, bits:+ui.bits.value,
+      field:F, sink, clusterAlgo:ui.clusterAlgo.value, netAlgo:ui.netAlgo.value,
+      kofn:+ui.kofn.value, ftFrac, rounds:+ui.rounds.value
+    },
+    rgen, nodes, chs:cents,
+    round:0, history:{energy:[], alive:[]}, FND:null, LND:null,
+    consensusNow:null,
+    algs: Array.from(ui.baselines.selectedOptions).map(o=>o.value)
+  };
+}
+
+/*** Drawing ***/
+function drawNetwork(state){
+  const {netSVG, netTip} = ui;
+  const size = 600, pad=20; // draw area
+  const F = state.params.field;
+  const sx = d3.scaleLinear().domain([0,1]).range([pad,size-pad]);
+  const sy = d3.scaleLinear().domain([0,1]).range([size-pad,pad]);
+  netSVG.attr('width', size).attr('height', size);
+  netSVG.selectAll('*').remove();
+
+  // grid
+  netSVG.append('rect').attr('x',0).attr('y',0).attr('width',size).attr('height',size).attr('fill','#0b0f1f');
+  for(let g=0; g<=4; g++){
+    const x = pad + (size-2*pad)*g/4;
+    netSVG.append('line').attr('x1',x).attr('x2',x).attr('y1',pad).attr('y2',size-pad).attr('stroke','#20264a');
+    const y = pad + (size-2*pad)*g/4;
+    netSVG.append('line').attr('x1',pad).attr('x2',size-pad).attr('y1',y).attr('y2',y).attr('stroke','#20264a');
+  }
+
+  // sink
+  netSVG.append('rect')
+    .attr('x', sx(state.params.sink.x)-7).attr('y', sy(state.params.sink.y)-7)
+    .attr('width',14).attr('height',14)
+    .attr('fill','#7aa2ff').attr('stroke','#fff4').append('title').text('Sink');
+
+  // CHs
+  netSVG.selectAll('.ch')
+    .data(state.chs)
+    .enter().append('circle')
+    .attr('class','ch')
+    .attr('cx',d=>sx(d.x)).attr('cy',d=>sy(d.y)).attr('r',9)
+    .attr('fill','#ffd43b').attr('stroke','#fff4');
+
+  // Links: node->CH (thin)
+  const links = [];
+  for(const n of state.nodes){
+    const c = state.chs[n.cluster];
+    links.push({x1:n.x, y1:n.y, x2:c.x, y2:c.y, dead:n.dead});
+  }
+  netSVG.append('g').selectAll('line').data(links).enter().append('line')
+    .attr('x1',d=>sx(d.x1)).attr('y1',d=>sy(d.y1)).attr('x2',d=>sx(d.x2)).attr('y2',d=>sy(d.y2))
+    .attr('stroke', d=> d.dead ? '#3a405f' : '#2a3766').attr('stroke-width',0.6).attr('opacity',0.8);
+
+  // Nodes
+  const nodes = netSVG.append('g').selectAll('.node').data(state.nodes).enter().append('circle')
+    .attr('class','node')
+    .attr('cx',d=>sx(d.x)).attr('cy',d=>sy(d.y))
+    .attr('r', d=> d.dead? 3 : 4.5)
+    .attr('fill', d=> d.dead? '#ff6b6b' : (d.byz? '#ff9f43' : '#51cf66'))
+    .attr('stroke','#0a0d22').attr('stroke-width',1.2)
+    .on('mousemove', function(event,d){
+      const c = state.chs[d.cluster];
+      netTip.style.display='block';
+      netTip.style.left = (event.offsetX+16)+'px';
+      netTip.style.top  = (event.offsetY+16)+'px';
+      netTip.innerHTML = `
+        <b>Node #${d.id}${d.byz?' (Byzantine)':''}</b><br/>
+        Cluster: ${d.cluster+1} • Role: ${d.isCH?'CH':'Node'}<br/>
+        Energy: ${fmt(d.energy)} J • Status: ${d.dead?'Dead':'Alive'}<br/>
+        Reading: ${d.reading!==undefined?fmt(d.reading):'–'} • Binary: ${d.binary??'–'}<br/>
+        Dist→CH: ${fmt(dist(d,c)*state.params.field)} m
+      `;
+    })
+    .on('mouseleave', ()=> netTip.style.display='none');
+
+  // Cluster badges
+  const list = state.chs.map((c,i)=>({
+    i, maj: c.maj, votes: c.votes||{ones:0,zeros:0}, dead:c.dead
+  }));
+  ui.clusterList.innerHTML = list.map(e=>`
+    <div class="badge" style="margin:4px 0; background:${e.maj?'#13381f':'#3a1620'}">
+      Cluster ${e.i+1}: <b style="margin-left:6px">${e.maj?'TRUE':'FALSE'}</b>
+      <span style="opacity:.8; margin-left:10px">ones=${fmt(e.votes.ones)} zeros=${fmt(e.votes.zeros)}</span>
+      ${e.dead?'<span style="margin-left:auto;color:#ff8080">CH dead</span>':''}
+    </div>
+  `).join('');
+}
+
+function drawCharts(histories, labels){
+  // histories: array of {energy:[], alive:[], FND, LND}
+  const svgE = ui.energySVG, svgA = ui.aliveSVG;
+  svgE.selectAll('*').remove(); svgA.selectAll('*').remove();
+
+  const width = 600, height = 240, pad = {l:36,r:10,t:12,b:26};
+  svgE.attr('width',width).attr('height',height);
+  svgA.attr('width',width).attr('height',height);
+
+  // scales
+  const maxR = Math.max(...histories.map(h=>h.energy.length));
+  const x = d3.scaleLinear().domain([0, maxR-1]).range([pad.l, width-pad.r]);
+
+  const maxE = Math.max(...histories.map(h=>d3.max(h.energy)));
+  const yE = d3.scaleLinear().domain([0, maxE||1]).nice().range([height-pad.b, pad.t]);
+
+  const maxAlive = Math.max(...histories.map(h=>d3.max(h.alive)));
+  const yA = d3.scaleLinear().domain([0, maxAlive||1]).nice().range([height-pad.b, pad.t]);
+
+  const line = y => d3.line().x((d,i)=>x(i)).y(d=>y(d));
+
+  // axes
+  [ [svgE,yE,'Energy (J)'], [svgA,yA,'Alive nodes'] ].forEach(([svg,y,label])=>{
+    svg.append('g').attr('transform',`translate(0,${height-pad.b})`).call(d3.axisBottom(x).ticks(8)).attr('color','#9fb0ff');
+    svg.append('g').attr('transform',`translate(${pad.l},0)`).call(d3.axisLeft(y).ticks(5)).attr('color','#9fb0ff');
+    svg.append('text').attr('x',pad.l).attr('y',pad.t+2).attr('fill','#cfd6ff').attr('font-size',12).text(label);
+  });
+
+  const palette = d3.schemeCategory10;
+
+  histories.forEach((h,idx)=>{
+    // Energy
+    svgE.append('path')
+      .attr('d', line(yE)(h.energy))
+      .attr('fill','none').attr('stroke', palette[idx%10]).attr('stroke-width',2);
+    // Alive
+    svgA.append('path')
+      .attr('d', line(yA)(h.alive))
+      .attr('fill','none').attr('stroke', palette[idx%10]).attr('stroke-width',2);
+
+    // FND/LND markers on Alive
+    if(h.FND!=null){
+      svgA.append('line').attr('x1',x(h.FND)).attr('x2',x(h.FND)).attr('y1',pad.t).attr('y2',height-pad.b)
+        .attr('stroke', palette[idx%10]).attr('stroke-dasharray','4,4').attr('opacity',.8);
+      svgA.append('text').attr('x',x(h.FND)+4).attr('y',pad.t+12).attr('fill',palette[idx%10]).attr('font-size',11).text(labels[idx]+': FND '+h.FND);
+    }
+    if(h.LND!=null){
+      svgA.append('line').attr('x1',x(h.LND)).attr('x2',x(h.LND)).attr('y1',pad.t).attr('y2',height-pad.b)
+        .attr('stroke', palette[idx%10]).attr('stroke-dasharray','4,4').attr('opacity',.8);
+      svgA.append('text').attr('x',x(h.LND)+4).attr('y',pad.t+24).attr('fill',palette[idx%10]).attr('font-size',11).text(labels[idx]+': LND '+h.LND);
+    }
+  });
+
+  // Hover tooltips
+  function addHover(svg, y, tipEl, datasets, labels){
+    svg.on('mousemove', (ev)=>{
+      const [mx,my] = d3.pointer(ev);
+      const r = Math.round(x.invert(mx));
+      const rows = datasets.map((ds,i)=>{
+        const v = ds[r]!==undefined? ds[r]: null;
+        return v!=null ? `<div><b>${labels[i]}</b>: ${fmt(v)}</div>` : '';
+      }).join('');
+      tipEl.style.display='block';
+      tipEl.style.left = (ev.offsetX+16)+'px';
+      tipEl.style.top  = (ev.offsetY+16)+'px';
+      tipEl.innerHTML = `<b>Round ${r}</b>${rows}`;
+    }).on('mouseleave', ()=> tipEl.style.display='none');
+  }
+  addHover(svgE, yE, ui.energyTip, histories.map(h=>h.energy), labels);
+  addHover(svgA, yA, ui.aliveTip, histories.map(h=>h.alive), labels);
+}
+
+function updateStats(state){
+  ui.stRound.textContent = state.round;
+  ui.stAlive.textContent = state.nodes.filter(n=>!n.dead).length;
+  ui.stCons.textContent = state.consensusNow===null? 'N/A' : (state.consensusNow? 'TRUE' : 'FALSE');
+  ui.stFND.textContent = state.FND ?? '–';
+  ui.stLND.textContent = state.LND ?? '–';
+  ui.stFaulty.textContent = state.nodes.filter(n=>n.dead||n.byz).length;
+}
+
+function log(msg){ ui.log.textContent += msg + '\n'; }
+
+/*** Run control ***/
+function reset(){
+  app = initState();
+  ui.status.textContent = 'Initialized';
+  drawNetwork(app);
+  updateStats(app);
+  drawCharts([{energy:[], alive:[], FND:null, LND:null}], ['(empty)']);
+}
+reset();
+
+ui.reset.onclick = reset;
+
+ui.step.onclick = ()=>{
+  const labels = [];
+  const histories = [];
+
+  // Selected algorithms
+  for(const alg of app.algs){
+    // Use independent state per algorithm but same initial geometry and RNG seed offset
+    let st = JSON.parse(JSON.stringify(app));
+    st.rgen = rand(+ui.seed.value + (alg==='BCA'?0: alg==='LEACH'?1: alg==='DEEC'?2:3));
+    st.history = {energy:[], alive:[]}; st.round=app.round; st.FND=null; st.LND=null;
+    if(alg==='BCA'){
+      simulateRound(st);
+    }else{
+      // For baselines we do NOT use fixed CHs — give everyone same energy start except SEP with adv nodes
+      st.chs = []; // ignored
+      simulateRoundBaseline(st, alg);
+    }
+    labels.push(alg);
+    histories.push({energy: st.history.energy, alive: st.history.alive, FND: st.FND, LND: st.LND});
+  }
+
+  // Advance canonical state one round with BCA to keep the network view meaningful
+  simulateRound(app);
+  app.round++;
+  drawNetwork(app);
+  updateStats(app);
+  drawCharts(histories, labels);
+  ui.status.textContent = 'Stepped';
+  log(`[Round ${app.round}] Consensus=${app.consensusNow} Alive=${app.nodes.filter(n=>!n.dead).length}`);
+};
+
+ui.run.onclick = async ()=>{
+  ui.run.disabled = true; ui.step.disabled = true; ui.status.textContent = 'Running…';
+  const total = +ui.rounds.value;
+  const labels = app.algs.slice();
+  const histories = app.algs.map(_=>({energy:[], alive:[], FND:null, LND:null}));
+  // independent states per algorithm
+  const states = app.algs.map((alg,idx)=>{
+    const st = initState();
+    st.rgen = rand(+ui.seed.value + idx);
+    return {alg, st};
+  });
+
+  for(let r=0;r<total;r++){
+    for(let i=0;i<states.length;i++){
+      const {alg, st} = states[i];
+      if(alg==='BCA') simulateRound(st); else simulateRoundBaseline(st, alg);
+      histories[i].energy = st.history.energy.slice();
+      histories[i].alive  = st.history.alive.slice();
+      histories[i].FND = st.FND; histories[i].LND = st.LND;
+    }
+    // keep network view synced with BCA
+    app = states.find(s=>s.alg==='BCA')?.st || states[0].st;
+    app.round = r+1;
+    if(r%10===0 || r===total-1){
+      drawNetwork(app); updateStats(app); drawCharts(histories, labels);
+      ui.status.textContent = `Running… ${r+1}/${total}`;
+      await new Promise(res=>setTimeout(res, 10));
+    }
+    if(app.nodes.every(n=>n.dead)) break;
+  }
+  ui.run.disabled = false; ui.step.disabled = false; ui.status.textContent = 'Done';
+};
+
+/*** Tabs ***/
+document.querySelectorAll('.tab').forEach(el=>{
+  el.onclick = ()=>{
+    document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+    el.classList.add('active');
+    const id = el.dataset.tab;
+    document.querySelectorAll('.tabpane').forEach(p=>p.style.display='none');
+    document.getElementById('tab-'+id).style.display='';
+  };
+});
+</script>
+</body>
+</html>
