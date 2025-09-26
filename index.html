@@ -607,13 +607,37 @@ function drawNetwork(state){
     .attr('width',14).attr('height',14)
     .attr('fill','#7aa2ff').attr('stroke','#fff4').append('title').text('Sink');
 
-  // CHs
-  netSVG.selectAll('.ch')
-    .data(state.chs)
-    .enter().append('circle')
-    .attr('class','ch')
-    .attr('cx',d=>sx(d.x)).attr('cy',d=>sy(d.y)).attr('r',9)
-    .attr('fill','#ffd43b').attr('stroke','#fff4');
+  // === Cluster Heads (on top, with hover tooltip) ===
+  const chSel = netSVG.append('g').attr('class','chs').selectAll('circle')
+  .data(state.chs)
+  .enter().append('circle')
+  .attr('class','ch')
+  .attr('cx', d => sx(d.x))
+  .attr('cy', d => sy(d.y))
+  .attr('r', 9)
+  .attr('fill', '#ffd43b')
+  .attr('stroke', '#fff4')
+  .style('cursor','pointer')
+  .on('mousemove', function (event, d) {
+    const members = state.nodes.filter(n => n.cluster === state.chs.indexOf(d) && !n.dead);
+    const ones = d.votes?.ones ?? 0;
+    const zeros = d.votes?.zeros ?? 0;
+    const maj = (typeof d.maj === 'boolean') ? d.maj : null;
+    const ds = Math.hypot((d.x - state.params.sink.x) * state.params.field,
+                          (d.y - state.params.sink.y) * state.params.field);
+
+    ui.netTip.style.display = 'block';
+    ui.netTip.style.left = (event.offsetX + 16) + 'px';
+    ui.netTip.style.top  = (event.offsetY + 16) + 'px';
+    ui.netTip.innerHTML = `
+      <b>Cluster Head #${state.chs.indexOf(d) + 1}</b><br/>
+      Energy: ${fmt(d.energy)} J • Status: ${d.dead ? 'Dead' : 'Alive'}<br/>
+      Members: ${members.length} • Dist→Sink: ${fmt(ds)} m<br/>
+      Majority: ${maj===null ? '–' : (maj ? 'TRUE' : 'FALSE')}<br/>
+      Votes: ones=${fmt(ones)} zeros=${fmt(zeros)}
+    `;
+  })
+  .on('mouseleave', () => { ui.netTip.style.display = 'none'; });
 
   // Links: node->CH (thin)
   const links = [];
