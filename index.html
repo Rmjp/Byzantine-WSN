@@ -250,6 +250,75 @@
   </main>
 </div>
 
+<script>
+// Simple D3 shim for basic functionality when CDN is blocked
+if (typeof d3 === 'undefined') {
+  window.d3 = {
+    select: function(selector) {
+      const element = document.querySelector(selector);
+      const selection = {
+        attr: function(name, value) { 
+          if (element && typeof value !== 'undefined') element.setAttribute(name, value); 
+          return selection; 
+        },
+        style: function(name, value) { 
+          if (element && typeof value !== 'undefined') element.style[name] = value; 
+          return selection; 
+        },
+        text: function(text) { 
+          if (element && typeof text !== 'undefined') element.textContent = text; 
+          return selection; 
+        },
+        selectAll: function(sel) { 
+          return { 
+            remove: function() {
+              if (element) {
+                const nodes = element.querySelectorAll(sel);
+                nodes.forEach(node => node.remove());
+              }
+              return this;
+            }
+          }; 
+        },
+        append: function(tag) { 
+          const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+          if (element) element.appendChild(el);
+          return { 
+            attr: function(name, value) { if (el) el.setAttribute(name, value); return this; },
+            style: function(name, value) { if (el) el.style[name] = value; return this; },
+            text: function(text) { if (el) el.textContent = text; return this; }
+          };
+        }
+      };
+      return selection;
+    },
+    scaleLinear: function() {
+      let domain = [0, 1], range = [0, 1];
+      const scale = function(x) {
+        return range[0] + (x - domain[0]) * (range[1] - range[0]) / (domain[1] - domain[0]);
+      };
+      scale.domain = function(d) { if (d) { domain = d; return scale; } return domain; };
+      scale.range = function(r) { if (r) { range = r; return scale; } return range; };
+      scale.nice = function() { return scale; };
+      return scale;
+    },
+    max: function(arr) { return Math.max(...arr); },
+    line: function() {
+      let xFn = d => d[0], yFn = d => d[1];
+      const line = function(data) {
+        return data.map((d, i) => `${i === 0 ? 'M' : 'L'}${xFn(d, i)},${yFn(d, i)}`).join('');
+      };
+      line.x = function(fn) { xFn = fn; return line; };
+      line.y = function(fn) { yFn = fn; return line; };
+      return line;
+    },
+    axisBottom: function(scale) { return function() {}; },
+    axisLeft: function(scale) { return function() {}; },
+    pointer: function(event) { return [event.offsetX, event.offsetY]; },
+    schemeCategory10: ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+  };
+}
+</script>
 <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
 <script>
 /*** Utilities ***/
@@ -833,10 +902,10 @@ ui.run.onclick = async ()=>{
     // keep network view synced with BCA
     app = states.find(s=>s.alg==='BCA')?.st || states[0].st;
     app.round = r+1;
-    if(r%10===0 || r===total-1){
+    if(r%25===0 || r===total-1){
       drawNetwork(app); updateStats(app); drawCharts(histories, labels);
       ui.status.textContent = `Running… ${r+1}/${total}`;
-      await new Promise(res=>setTimeout(res, 10));
+      await new Promise(res=>setTimeout(res, 100));
     }
     if(app.nodes.every(n=>n.dead)) break;
   }
