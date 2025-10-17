@@ -85,7 +85,7 @@
       </div>
       <div>
         <label>Rounds</label>
-        <input id="rounds" type="number" min="50" step="50" value="400">
+        <input id="rounds" type="number" min="50" step="50" value="2000">
       </div>
     </div>
     <div class="row">
@@ -157,6 +157,16 @@
         <label>Bits per packet</label>
         <input id="bits" type="number" value="4000">
       </div>
+    </div>
+    <div class="row">
+      <div>
+        <label>BCA frame mode</label>
+        <select id="bcaMode">
+          <option value="frame" selected>Frame (use Bits)</option>
+          <option value="binary">Binary (1-bit)</option>
+        </select>
+      </div>
+      <div></div>
     </div>
 
     <h3>Compare Algorithms</h3>
@@ -239,8 +249,12 @@
         </div>
         <div class="canvasBox">
           <div id="aliveTip" class="tooltip" style="display:none"></div>
-          <svg id="aliveChart" class="chart" aria-label="Alive nodes"></svg>
+          <svg id="aliveChart" class="chart" aria-label="Alive nodes + CHs"></svg>
         </div>
+      </div>
+      <div style="margin-top:10px; display:flex; gap:8px; align-items:center;">
+        <button id="exportCsv">Export CSV</button>
+        <span class="notice">Downloads per-round Energy and Alive series for visible algorithms.</span>
       </div>
     </section>
 
@@ -327,6 +341,11 @@ function simulateRound(state){
   } = state;
   const {T, Eelec, EDA, bits, sink, clusterAlgo, netAlgo, kofn, ftFrac, field} = params;
 
+  // BCA uses 1-bit assertions: nodes send 1-bit to CH; CH sends 1-bit decision to sink
+  const nodeBitsToCH = (params.bcaMode === 'binary') ? 1 : params.bits;
+  // CH only sends a 1-bit decision to the sink (matches paper narrative)
+  const chBitsToSink = 1;
+
   // Sensor readings + Byzantine behavior (binary assertion)
   for(const n of nodes){
     if(n.dead) continue;
@@ -342,7 +361,7 @@ function simulateRound(state){
     n.binary = bin;
   }
 
-  // Cluster-level majority at CHs
+  // Cluster-level majority at CHs (compute first so FT decision is based on this round's values)
   const k = chs.length;
   const chMajorities = [];
   for(let ci=0; ci<k; ci++){
@@ -351,23 +370,6 @@ function simulateRound(state){
     chs[ci].maj = res.majority;
     chs[ci].votes = res.votes;
     chMajorities.push(res.majority);
-    // Energy: nodes tx to CH, CH aggregates & tx to sink
-    const ch = chs[ci];
-    // node -> CH
-    for(const n of inCluster){
-      const d = Math.hypot((n.x-ch.x)*field, (n.y-ch.y)*field);
-      const Etx = (Eelec*bits + 0.001 * d) * 1e-9; // simplified path loss term
-      n.energy -= Etx;
-      if(n.energy<=0){ n.energy=0; n.dead=true; }
-      const Erx = (Eelec*bits) * 1e-9;
-      ch.energy -= Erx;
-    }
-    // CH aggregation cost
-    ch.energy -= (EDA*bits*inCluster.length) * 1e-9;
-    // CH -> sink send only binary (1 bit → model with same header size)
-    const ds = Math.hypot((ch.x-sink.x)*field, (ch.y-sink.y)*field);
-    ch.energy -= (Eelec*bits + 0.001 * ds) * 1e-9;
-    if(ch.energy<=0){ ch.energy=0; ch.dead=true; }
   }
 
   // Network-level consensus + Byzantine fault tolerance condition
@@ -375,18 +377,54 @@ function simulateRound(state){
   const faulty = nodes.filter(n => n.dead || n.byz).length;
   const faultLimit = Math.floor(nodes.length * ftFrac);
   const baOk = faulty < faultLimit;
-
-  // Update stats
-  const alive = nodes.filter(n=>!n.dead).length;
-  state.history.alive.push(alive);
-  const totE = nodes.reduce((s,n)=>s+n.energy,0) + chs.reduce((s,c)=>s+c.energy,0);
-  state.history.energy.push(totE);
   state.consensusNow = consensus && baOk;
+  if(!baOk){ state.firstFTRound = state.firstFTRound ?? (state.round || 0); state.stoppedByFT = true; }
 
-  // Record FND / LND
-  if(state.FND===null && alive < nodes.length) state.FND = round;
-  if(alive===0) state.LND ??= round;
+  // If FT is exceeded we stop nodes/CHs operating (no further energy changes), but still record
+  // consensus state and alive/energy history. This preserves the simulation timeline while
+  // preventing further consumption past FT.
+  const skipEnergy = !!state.stoppedByFT;
 
+  // Energy: apply only if not skipped
+  if(!skipEnergy){
+    for(let ci=0; ci<k; ci++){
+      const inCluster = nodes.filter(n => n.cluster===ci && !n.dead);
+      const ch = chs[ci];
+      // node -> CH (nodes assert binary votes; use 1-bit payload)
+      const ETx = params.ETx ?? ((b,d)=> (Eelec*1e-9)*b + (d<1? 0 : 0.001*b*d));
+      const ERx = params.ERx ?? ((b)=> (Eelec*1e-9)*b);
+      for(const n of inCluster){
+        const d = Math.hypot((n.x-ch.x)*field, (n.y-ch.y)*field);
+        const Etx = ETx(nodeBitsToCH, d);
+        n.energy -= Etx;
+        if(n.energy<=0){ n.energy=0; n.dead=true; }
+        const Erx = ERx(nodeBitsToCH);
+        ch.energy -= Erx;
+        if(ch.energy<=0){ ch.energy=0; ch.dead=true; }
+      }
+      // CH aggregation cost (cost per member reading aggregated)
+      ch.energy -= (EDA * nodeBitsToCH * inCluster.length) * 1e-9;
+      // CH -> sink send only binary decision (1-bit)
+      const ds = Math.hypot((ch.x-sink.x)*field, (ch.y-sink.y)*field);
+      ch.energy -= ETx(chBitsToSink, ds);
+      if(ch.energy<=0){ ch.energy=0; ch.dead=true; }
+    }
+  }
+
+  // ===== FIX: Alive now counts Nodes + CHs =====
+  const aliveNodes = nodes.filter(n=>!n.dead).length;
+  // store alive nodes only (paper reports surviving sensor nodes)
+  state.history.alive.push(aliveNodes);
+
+  // Energy series (nodes + CHs)
+  // Energy series: sum only sensor node energies (exclude CH energy per request)
+  const totE = nodes.reduce((s,n)=>s+n.energy,0);
+  state.history.energy.push(totE);
+
+  // consensusNow and firstFTRound were set earlier (before energy updates)
+
+  // advance per-state round so external loops and epoch logic remain consistent
+  state.round = (state.round || 0) + 1;
   return state;
 }
 
@@ -409,29 +447,50 @@ function simulateRoundBaseline(state, kind){
     return state;
   }
 
+  // baselines do not stop operating at FT; they always consume energy
+
   // Reset CH flags
   for (const n of eligible) n.isCH = false;
 
-  // Expected CH fraction
-  let P = 0.05;
+  // Expected CH fraction (p_opt)
+  const p_opt = 0.05;
+
+  // Helper: LEACH threshold-based epoch selection
+  function leachIsCH(n, r, p){
+    const epoch = Math.floor(1 / p);
+    const inG = (r - (n.lastChRound||-Infinity)) >= epoch;
+    if(!inG) return false;
+    const mod = r % epoch;
+    const T = p / (1 - p * mod);
+    if (rgen() < T) { n.lastChRound = r; return true; }
+    return false;
+  }
+
+  // SEP selection with heterogeneity weights
+  function sepIsCH(n, r){
+    const m_frac = nodes.filter(x=>x.adv).length / Math.max(1, nodes.length);
+    const alpha = params.alpha ?? 1.0;
+    const pa = p_opt * (1 + alpha) / (1 + alpha * m_frac);
+    const pn = p_opt / (1 + alpha * m_frac);
+    const p = n.adv ? pa : pn;
+    return leachIsCH(n, r, p);
+  }
+
+  // DEEC: probability proportional to residual energy / average energy
+  function deecIsCH(n, r){
+    const Eavg = nodes.reduce((s,x)=>s + x.energy, 0) / Math.max(1, nodes.length);
+    const pi = Eavg > 0 ? p_opt * (n.energy / Eavg) : p_opt;
+    const p = Math.min(pi, 0.5);
+    return leachIsCH(n, r, p);
+  }
 
   // Choose CHs per baseline
   if (kind === "LEACH") {
-    for (const n of eligible) {
-      if (rgen() < P) n.isCH = true;
-    }
+    for (const n of eligible) { if (leachIsCH(n, round, p_opt)) n.isCH = true; }
   } else if (kind === "DEEC") {
-    const maxE = Math.max(...eligible.map(n => n.energy));
-    for (const n of eligible) {
-      const w = maxE > 0 ? (n.energy / maxE) : 0;
-      if (rgen() < clamp(P * 1.5 * w, 0, 0.5)) n.isCH = true;
-    }
+    for (const n of eligible) { if (deecIsCH(n, round)) n.isCH = true; }
   } else { // "SEP"
-    for (const n of eligible) {
-      const isAdv = n.adv ?? (n.adv = rgen() < 0.1);
-      const p = isAdv ? P * 2.2 : P * 0.6;
-      if (rgen() < p) n.isCH = true;
-    }
+    for (const n of eligible) { if (sepIsCH(n, round)) n.isCH = true; }
   }
 
   // Ensure at least one CH if there are eligible nodes
@@ -441,7 +500,7 @@ function simulateRoundBaseline(state, kind){
     chs = eligible.filter(n => n.isCH);
   }
 
-  // Node -> nearest CH
+  // Node -> nearest CH using ETx/ERx
   for (const n of eligible) {
     if (n.isCH) continue;
     let near = null, bd = Infinity;
@@ -450,18 +509,15 @@ function simulateRoundBaseline(state, kind){
       if (d2 < bd) { bd = d2; near = c; }
     }
     if (!near) continue; // no CH found (extreme edge case)
-
     const d = Math.hypot((n.x - near.x) * field, (n.y - near.y) * field);
-    const Etx = (Eelec * bits + 0.001 * d) * 1e-9;
-    const Erx = (Eelec * bits) * 1e-9;
+    const ETxfn = params.ETx ?? ((b, dist) => (Eelec * 1e-9) * b + (0.001 * b * dist));
+    const ERxfn = params.ERx ?? ((b) => (Eelec * 1e-9) * b);
+    const eTx = ETxfn(bits, d);
+    const eRx = ERxfn(bits);
 
-    n.energy -= Etx;
-    if (n.energy <= 0) { n.energy = 0; n.dead = true; }
-
-    near.energy -= Erx;
-    if (near.energy <= 0) { near.energy = 0; near.dead = true; }
+    n.energy -= eTx; if (n.energy <= 0) { n.energy = 0; n.dead = true; }
+    near.energy -= eRx; if (near.energy <= 0) { near.energy = 0; near.dead = true; }
   }
-
   // CH aggregation and CH -> sink
   for (const c of chs) {
     if (c.dead) continue;
@@ -481,14 +537,14 @@ function simulateRoundBaseline(state, kind){
     // Aggregation energy
     c.energy -= (EDA * bits * inDeg) * 1e-9;
 
-    // Send to sink (use same header size for simplicity)
+    // Send to sink (use ETx)
     const ds = Math.hypot((c.x - sink.x) * field, (c.y - sink.y) * field);
-    c.energy -= (Eelec * bits + 0.001 * ds) * 1e-9;
-
+    const ETxfn = params.ETx ?? ((b, dist) => (Eelec * 1e-9) * b + (0.001 * b * dist));
+    c.energy -= ETxfn(bits, ds);
     if (c.energy <= 0) { c.energy = 0; c.dead = true; }
   }
 
-  const alive = nodes.filter(n => !n.dead).length;
+  const alive = nodes.filter(n => !n.dead).length; // baselines count nodes (CHs are nodes)
   state.history.alive.push(alive);
   state.history.energy.push(nodes.reduce((s, n) => s + n.energy, 0));
 
@@ -496,6 +552,8 @@ function simulateRoundBaseline(state, kind){
   if (alive === 0) state.LND ??= round;
 
   state.consensusNow = null; // not applicable to baselines
+  // advance per-state round so epoch/threshold logic progresses for this state
+  state.round = (state.round || 0) + 1;
   return state;
 }
 
@@ -515,6 +573,7 @@ const ui = {
   Eelec: document.getElementById('Eelec'),
   EDA: document.getElementById('EDA'),
   bits: document.getElementById('bits'),
+  bcaMode: document.getElementById('bcaMode'),
   baselines: document.getElementById('baselines'),
   seed: document.getElementById('seed'),
   run: document.getElementById('run'),
@@ -550,34 +609,61 @@ function initState(){
   if(sinkSel==="center") sink = {x:.5, y:.5};
   else { const [sx,sy] = sinkSel.split(',').map(Number); sink = {x:sx/F, y:sy/F}; }
   const ftFrac = eval(ui.ft.value); // 1/2, 1/3, 1/4
+  // Heterogeneity + node generation (SEP / DEEC support)
+  const E0 = 0.5;               // J, normal node initial energy
+  const m = 0.1;                // fraction advanced (SEP default)
+  const alpha = 1.0;            // extra energy factor for advanced nodes
+  const Nadv = Math.floor(N * m);
+  const byzN = Math.floor(N * (+ui.byzPct.value)/100);
 
-  // Generate nodes in [0,1] space then scale on draw
+  // deterministic shuffle using rgen to pick advanced and byzantine sets
+  const indices = Array.from({length:N}, (_,i)=>i);
+  for(let i=N-1;i>0;i--){ const j = Math.floor(rgen()*(i+1)); const t = indices[i]; indices[i]=indices[j]; indices[j]=t; }
+  const advSet = new Set(indices.slice(0, Nadv));
+  const byzSet = new Set(indices.slice(Nadv, Nadv + byzN));
+
   const nodes = Array.from({length:N}, (_,i)=>({
     id:i+1,
     x: (rgen()*0.9+0.05), y: (rgen()*0.9+0.05),
-    energy: 0.5, // J (paper)
+    energy: advSet.has(i) ? E0*(1+alpha) : E0,
     dead:false,
-    byz:false,
+    byz: byzSet.has(i),
+    adv: advSet.has(i),
+    lastChRound: -Infinity // epoch memory for CH election
   }));
-  // Assign byzantine
-  const byzN = Math.floor(N * (+ui.byzPct.value)/100);
-  for(let i=0;i<byzN;i++){ nodes[i].byz = true; }
 
   // Clustering (fixed CHs for BCA; baselines re-elect)
-  const cents = kmeans(nodes, K, rgen).map(c=>({x:c.x, y:c.y, energy:5, dead:false})); // CH energy 5J
+  const cents = kmeans(nodes, K, rgen).map(c=>({x:c.x, y:c.y, energy:50, dead:false})); // CH energy 5J
   nodes.forEach(n=>{
     // already assigned .cluster by kmeans
   });
+
+  // Radio model parameters (first-order model)
+  // E_elec in UI is provided in nJ/bit; convert when used. The following
+  // are typical literature values (Joule scale):
+  const Efs = 10e-12;   // free-space (J/bit/m^2)
+  const Emp = 1.3e-15;  // multi-path (J/bit/m^4)
+  const d0 = Math.sqrt(Efs/Emp);
+
+  // Attach physical params to params object so other functions can use them
+  // (bits will be passed at call-time). ETx/ERx accept bits (count) and d (m).
+  const ETx = (bits, d) => ((+ui.Eelec.value)*1e-9)*bits + (d < d0 ? Efs*bits*d*d : Emp*bits*d*d*d*d);
+  const ERx = (bits) => ((+ui.Eelec.value)*1e-9)*bits;
 
   return {
     params:{
       T:+ui.thresh.value, Eelec:+ui.Eelec.value, EDA:+ui.EDA.value, bits:+ui.bits.value,
       field:F, sink, clusterAlgo:ui.clusterAlgo.value, netAlgo:ui.netAlgo.value,
-      kofn:+ui.kofn.value, ftFrac, rounds:+ui.rounds.value
+      kofn:+ui.kofn.value, ftFrac, rounds:+ui.rounds.value,
+      ETx, ERx, // radio model helpers
+      alpha, m
+      , bcaMode: ui.bcaMode.value
     },
     rgen, nodes, chs:cents,
     round:0, history:{energy:[], alive:[]}, FND:null, LND:null,
-    consensusNow:null,
+    consensusNow:null, firstFTRound:null,
+    // when FT is exceeded we keep simulating but nodes/CHs stop operating (no energy use)
+    stoppedByFT: false,
     algs: Array.from(ui.baselines.selectedOptions).map(o=>o.value)
   };
 }
@@ -684,7 +770,13 @@ function drawNetwork(state){
   `).join('');
 }
 
+// Keep last-drawn histories/labels for CSV export
+let __lastChartHistories = null;
+let __lastChartLabels = null;
+
 function drawCharts(histories, labels){
+  __lastChartHistories = histories.map(h=>({energy: h.energy.slice(), alive: h.alive.slice(), FND: h.FND, LND: h.LND}));
+  __lastChartLabels = labels && labels.slice();
   // histories: array of {energy:[], alive:[], FND, LND}
   const svgE = ui.energySVG, svgA = ui.aliveSVG;
   svgE.selectAll('*').remove(); svgA.selectAll('*').remove();
@@ -695,7 +787,7 @@ function drawCharts(histories, labels){
 
   // scales
   const maxR = Math.max(...histories.map(h=>h.energy.length));
-  const x = d3.scaleLinear().domain([0, maxR-1]).range([pad.l, width-pad.r]);
+  const x = d3.scaleLinear().domain([0, Math.max(0, maxR-1)]).range([pad.l, width-pad.r]);
 
   const maxE = Math.max(...histories.map(h=>d3.max(h.energy)));
   const yE = d3.scaleLinear().domain([0, maxE||1]).nice().range([height-pad.b, pad.t]);
@@ -706,7 +798,7 @@ function drawCharts(histories, labels){
   const line = y => d3.line().x((d,i)=>x(i)).y(d=>y(d));
 
   // axes
-  [ [svgE,yE,'Energy (J)'], [svgA,yA,'Alive nodes'] ].forEach(([svg,y,label])=>{
+  [ [svgE,yE,'Energy (J)'], [svgA,yA,'Alive (nodes)'] ].forEach(([svg,y,label])=>{
     svg.append('g').attr('transform',`translate(0,${height-pad.b})`).call(d3.axisBottom(x).ticks(8)).attr('color','#9fb0ff');
     svg.append('g').attr('transform',`translate(${pad.l},0)`).call(d3.axisLeft(y).ticks(5)).attr('color','#9fb0ff');
     svg.append('text').attr('x',pad.l).attr('y',pad.t+2).attr('fill','#cfd6ff').attr('font-size',12).text(label);
@@ -724,7 +816,7 @@ function drawCharts(histories, labels){
       .attr('d', line(yA)(h.alive))
       .attr('fill','none').attr('stroke', palette[idx%10]).attr('stroke-width',2);
 
-    // FND/LND markers on Alive
+    // FND/LND markers on Alive (note: these are based on nodes only)
     if(h.FND!=null){
       svgA.append('line').attr('x1',x(h.FND)).attr('x2',x(h.FND)).attr('y1',pad.t).attr('y2',height-pad.b)
         .attr('stroke', palette[idx%10]).attr('stroke-dasharray','4,4').attr('opacity',.8);
@@ -756,13 +848,51 @@ function drawCharts(histories, labels){
   addHover(svgA, yA, ui.aliveTip, histories.map(h=>h.alive), labels);
 }
 
+// Build CSV from last-drawn chart histories and trigger download
+function exportCsv(){
+  const histories = __lastChartHistories;
+  const labels = __lastChartLabels;
+  if(!histories || !labels){ alert('No chart data to export. Run or Step the simulation first.'); return; }
+  // Determine max rounds
+  const maxR = Math.max(...histories.map(h=>h.energy.length));
+  // Build header: Round, <Label1> Energy, <Label1> Alive, <Label2> Energy, ...
+  const hdr = ['Round'];
+  for(const lab of labels){ hdr.push(`${lab} Energy (J)`); hdr.push(`${lab} Alive`); }
+  const rows = [hdr.join(',')];
+  for(let r=0;r<maxR;r++){
+    const cols = [r];
+    for(const h of histories){
+      const e = h.energy[r]!==undefined? h.energy[r] : '';
+      const a = h.alive[r]!==undefined? h.alive[r] : '';
+      cols.push(typeof e === 'number' ? e.toFixed(6) : e);
+      cols.push(typeof a === 'number' ? a : a);
+    }
+    rows.push(cols.join(','));
+  }
+  const csv = rows.join('\n');
+  const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const ts = new Date().toISOString().replace(/[:.]/g,'-');
+  a.href = url; a.download = `byzantine-charts-${ts}.csv`;
+  document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+}
+
+// Wire export button
+document.addEventListener('DOMContentLoaded', ()=>{
+  const btn = document.getElementById('exportCsv');
+  if(btn) btn.onclick = exportCsv;
+});
+
 function updateStats(state){
   ui.stRound.textContent = state.round;
-  ui.stAlive.textContent = state.nodes.filter(n=>!n.dead).length;
+  ui.stAlive.textContent = state.nodes.filter(n=>!n.dead).length; // nodes only in stat
   ui.stCons.textContent = state.consensusNow===null? 'N/A' : (state.consensusNow? 'TRUE' : 'FALSE');
   ui.stFND.textContent = state.FND ?? '–';
   ui.stLND.textContent = state.LND ?? '–';
   ui.stFaulty.textContent = state.nodes.filter(n=>n.dead||n.byz).length;
+  // annotate FT-hit round if it occurred
+  if(state.firstFTRound!=null){ ui.stCons.textContent += ` (FT@${state.firstFTRound})`; }
 }
 
 function log(msg){ ui.log.textContent += msg + '\n'; }
@@ -788,7 +918,14 @@ ui.step.onclick = ()=>{
     // Use independent state per algorithm but same initial geometry and RNG seed offset
     let st = JSON.parse(JSON.stringify(app));
     st.rgen = rand(+ui.seed.value + (alg==='BCA'?0: alg==='LEACH'?1: alg==='DEEC'?2:3));
-    st.history = {energy:[], alive:[]}; st.round=app.round; st.FND=null; st.LND=null;
+    // JSON clone removes function values (ETx/ERx); restore them from the live `app`
+    st.params = st.params || {};
+    st.params.ETx = app.params.ETx;
+    st.params.ERx = app.params.ERx;
+    st.params.alpha = app.params.alpha;
+    st.params.m = app.params.m;
+  st.history = {energy:[], alive:[]}; st.round=app.round; st.FND=null; st.LND=null;
+  st.stoppedByFT = false; // per-alg clone should start without FT-stopped flag
     if(alg==='BCA'){
       simulateRound(st);
     }else{
@@ -802,12 +939,15 @@ ui.step.onclick = ()=>{
 
   // Advance canonical state one round with BCA to keep the network view meaningful
   simulateRound(app);
-  app.round++;
+  // Do not stop the simulation when FT is exceeded; record is in app.firstFTRound
+  if(app.firstFTRound!=null){
+    log(`[Note] Fault tolerance exceeded at round ${app.firstFTRound}`);
+  }
   drawNetwork(app);
   updateStats(app);
   drawCharts(histories, labels);
   ui.status.textContent = 'Stepped';
-  log(`[Round ${app.round}] Consensus=${app.consensusNow} Alive=${app.nodes.filter(n=>!n.dead).length}`);
+  log(`[Round ${app.round}] Consensus=${app.consensusNow} Alive(nodes)=${app.nodes.filter(n=>!n.dead).length} Alive(total)=${histories[0]?.alive?.[histories[0].alive.length-1] ?? '–'}`);
 };
 
 ui.run.onclick = async ()=>{
@@ -819,6 +959,7 @@ ui.run.onclick = async ()=>{
   const states = app.algs.map((alg,idx)=>{
     const st = initState();
     st.rgen = rand(+ui.seed.value + idx);
+    st.round = 0;
     return {alg, st};
   });
 
@@ -833,6 +974,10 @@ ui.run.onclick = async ()=>{
     // keep network view synced with BCA
     app = states.find(s=>s.alg==='BCA')?.st || states[0].st;
     app.round = r+1;
+    // keep running even if FT exceeded; annotate when FT first occurs
+    if(app.firstFTRound!=null && app.firstFTRound === app.round){
+      log(`[Note] Fault tolerance exceeded at round ${app.firstFTRound}`);
+    }
     if(r%10===0 || r===total-1){
       drawNetwork(app); updateStats(app); drawCharts(histories, labels);
       ui.status.textContent = `Running… ${r+1}/${total}`;
